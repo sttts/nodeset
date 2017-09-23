@@ -301,6 +301,7 @@ func (c *Controller) reconsileNodeSets() bool {
 			nsName := zone + "-" + name
 			ns, err := c.nodesetLister.Get(nsName)
 			if apierrors.IsNotFound(err) {
+				one := intstr.FromInt(1)
 				_, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Create(&v1alpha1.NodeSet{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -313,7 +314,7 @@ func (c *Controller) reconsileNodeSets() bool {
 					},
 					Spec: v1alpha1.NodeSetSpec{
 						NodeSetController: c.name,
-						MaxSurge:          &intstr.FromInt(1),
+						MaxSurge:          &one,
 						Replicas:          int32(igm.TargetSize),
 					},
 					Status: v1alpha1.NodeSetStatus{
