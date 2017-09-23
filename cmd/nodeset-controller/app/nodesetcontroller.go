@@ -31,7 +31,7 @@ import (
 	"github.com/kube-node/nodeset/cmd/nodeset-controller/app/options"
 	nodesetclientset "github.com/kube-node/nodeset/pkg/client/clientset/versioned"
 	nodesetinformers "github.com/kube-node/nodeset/pkg/client/informers/externalversions"
-	"github.com/kube-node/nodeset/pkg/controller/nodeset"
+	nodenodeset "github.com/kube-node/nodeset/pkg/controller/nodeset/node"
 )
 
 // ResyncPeriod returns a function which generates a duration each time it is
@@ -75,7 +75,7 @@ func Run(s *options.Options, stopCh <-chan struct{}) error {
 	*/
 	nodesetInformers := nodesetinformers.NewSharedInformerFactory(nodesetClient, ResyncPeriod(s)())
 	coreInformers := coreinformers.NewSharedInformerFactory(kubeClient, ResyncPeriod(s)())
-	nodesetController := nodeset.New(nodesetInformers.Nodeset().V1alpha1().NodeSets(), coreInformers.Core().V1().Nodes())
+	nodesetController := nodenodeset.New(nodesetInformers.Nodeset().V1alpha1().NodeSets(), coreInformers.Core().V1().Nodes())
 
 	nodesetInformers.Start(stopCh)
 	coreInformers.Start(stopCh)
