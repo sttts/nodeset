@@ -18,6 +18,7 @@ package gke
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -36,11 +38,18 @@ import (
 	nodesetinformers "github.com/kube-node/nodeset/pkg/client/informers/externalversions/nodeset/v1alpha1"
 	nodesetlisters "github.com/kube-node/nodeset/pkg/client/listers/nodeset/v1alpha1"
 	"github.com/kube-node/nodeset/pkg/nodeset/v1alpha1"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 const (
-	nodeAutoprovisioningPrefix = "nodeautoprovisioning"
+	nodeAutoprovisioningPrefix    = "nodeautoprovisioning"
+	gceUrlSchema                  = "https"
+	gceDomainSufix                = "googleapis.com/compute/v1/projects/"
+	gkeControllerAnnotationPrefix = "gke.nodeset.kube-node.github.com/"
+	nodePoolAnnotationKey         = gkeControllerAnnotationPrefix + "node-pool"
+	zoneAnnotationKey             = gkeControllerAnnotationPrefix + "zone"
+	projectAnnotationKey          = gkeControllerAnnotationPrefix + "project"
+	nodeSetFinalizer              = "gke.nodeset.kube-node.github.com"
 )
 
 type Controller struct {
@@ -198,77 +207,189 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	glog.Infof("NodeSet seen %q", nodeset.Name)
+	glog.Infof("NodeSet %q seen in queue", nodeset.Name)
 
 	return nil
 }
 
 func (c *Controller) runReconciler() {
 	for c.reconsileNodeSets() {
+		time.Sleep(5 * time.Minute)
 	}
 }
 
 func (c *Controller) reconsileNodeSets() bool {
+	// get all node sets
+	nodeSets, err := c.nodesetLister.List(nil)
+	if err != nil {
+		glog.Warningf("Failed to list NodeSet: %v", err)
+		return true
+	}
+	unseenNodeSets := sets.NewString()
+	for _, ns := range nodeSets {
+		unseenNodeSets.Insert(ns.Name)
+	}
+
 	resp, err := c.gke.Projects.Zones.Clusters.NodePools.List(c.cluster.Project, c.cluster.Zone, c.cluster.Name).Do()
 	if err != nil {
 		glog.Warningf("NodePool reconcile error: %v", err)
 		return true
 	}
 
+	seenErrors := false
 	for _, pool := range resp.NodePools {
-		/*autoprovisioned := strings.Contains(pool.Name, nodeAutoprovisioningPrefix)
-		autoscaled := pool.Autoscaling != nil && nodePool.Autoscaling.Enabled
-		if !autoprovisioned && !autoscaled {
+		autoprovisioned := strings.Contains(pool.Name, nodeAutoprovisioningPrefix)
+		if !autoprovisioned {
 			continue
 		}
+
 		// format is
 		// "https://www.googleapis.com/compute/v1/projects/mwielgus-proj/zones/europe-west1-b/instanceGroupManagers/gke-cluster-1-default-pool-ba78a787-grp"
-		for _, igurl := range nodePool.InstanceGroupUrls {
-			project, zone, name, err := parseGceUrl(igurl, "instanceGroupManagers")
+		for _, url := range pool.InstanceGroupUrls {
+			project, zone, name, err := parseGceUrl(url, "instanceGroupManagers")
 			if err != nil {
-				return err
+				glog.Warningf("parse error of %s/%s/%s InstanceGroupManager url %q", project, zone, name, url)
+				return true
 			}
-			mig := &Mig{
-				GceRef: GceRef{
-					Name:    name,
-					Zone:    zone,
-					Project: project,
-				},
-				gceManager:      m,
-				exist:           true,
-				autoprovisioned: autoprovisioned,
-				nodePoolName:    nodePool.Name,
-			}
-			existingMigs[mig.GceRef] = struct{}{}
 
-			if autoscaled {
-				mig.minSize = int(nodePool.Autoscaling.MinNodeCount)
-				mig.maxSize = int(nodePool.Autoscaling.MaxNodeCount)
-			} else if autoprovisioned {
-				mig.minSize = minAutoprovisionedSize
-				mig.maxSize = maxAutoprovisionedSize
+			igm, err := c.gce.InstanceGroupManagers.Get(project, zone, name).Do()
+			if err != nil {
+				seenErrors = true
+				glog.Warningf("Failed to get InstanceGroupManager %s/%s/%s", project, zone, name)
+				continue
 			}
-			m.RegisterMig(mig)
-		}
-		*/
 
-		_, err := c.nodesetLister.Get(pool.Name)
-		if apierrors.IsNotFound(err) {
-			_, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Create(&v1alpha1.NodeSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pool.Name,
-				},
-				Spec: v1alpha1.NodeSetSpec{
-					NodeSetController: c.name,
-					MaxSurge:          &intstr.FromInt(1),
-					//Replicas: pool.
-				},
+			nsName := zone + "-" + name
+			_, err = c.nodesetLister.Get(nsName)
+			if apierrors.IsNotFound(err) {
+				_, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Create(&v1alpha1.NodeSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							nodePoolAnnotationKey: pool.Name,
+							projectAnnotationKey:  project,
+							zoneAnnotationKey:     zone,
+						},
+						Name:       nsName,
+						Finalizers: []string{nodeSetFinalizer},
+					},
+					Spec: v1alpha1.NodeSetSpec{
+						NodeSetController: c.name,
+						MaxSurge:          &intstr.FromInt(1),
+						Replicas:          int32(igm.TargetSize),
+					},
+					Status: v1alpha1.NodeSetStatus{
+						Replicas:        int32(igm.TargetSize),
+						RunningReplicas: int32(igm.TargetSize),
+						// TODO: set more of the fields
+					},
+				})
+				continue
+			} else if err != nil {
+				glog.Warningf("Failed to get NodeSet %q: %v", name, err)
+				continue
+			}
+
+			// we have seen this one
+			unseenNodeSets.Delete(nsName)
+
+			// update
+			_, err = c.updateNodeSetWithRetries(10, nsName, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
+				old.Spec.Replicas = int32(igm.TargetSize)
+				old.Status.Replicas = int32(igm.TargetSize)
+				old.Status.RunningReplicas = int32(igm.TargetSize)
+				return old, nil
 			})
+			if err != nil {
+				seenErrors = true
+				glog.Warningf("Failed to update spec.replicas in NodeSet %q", nsName)
+			}
+		}
+	}
+
+	if seenErrors {
+		return true
+	}
+
+	// delete unseen nodesets
+	for _, nsName := range unseenNodeSets.List() {
+		// remove our finalizer. This also makes sure we will recreate the NodeSet if Google had a hickup
+		// and didn't show us the InstanceGroupManager anymore. I.e. we will not try to delete the later.
+		_, err := c.updateNodeSetWithRetries(10, nsName, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
+			if len(old.Finalizers) == 0 {
+				return old, nil
+			}
+			newFinalizers := make([]string, len(old.Finalizers)-1)
+			for _, f := range old.Finalizers {
+				if f == nodeSetFinalizer {
+					continue
+				}
+				newFinalizers = append(newFinalizers, f)
+			}
+			old.Finalizers = newFinalizers
+			return old, nil
+		})
+		if err != nil {
+			glog.Warningf("Failed to remove finalizer from NodeSet %q: %v", nsName, err)
 			continue
+		}
+
+		if err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Delete(nsName, nil); err != nil {
+			glog.Warningf("Failed to delete NodeSet %q: %v", nsName, err)
 		}
 	}
 
 	return true
+}
+
+func (c *Controller) updateNodeSetWithRetries(retries int, name string, f func(*v1alpha1.NodeSet) (*v1alpha1.NodeSet, error)) (*v1alpha1.NodeSet, error) {
+	const initialRetries = 10
+	for retries := initialRetries; retries > 0; retries = retries - 1 {
+		ns, err := c.nodesetLister.Get(name)
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		if err != nil {
+			glog.Warningf("Failed to get NodeSet %q, retrying up to %d more times: %v: %v", name, retries, err)
+			continue
+		}
+
+		ns, err = f(ns.DeepCopy())
+		if err != nil {
+			return nil, err
+		}
+
+		ns, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Update(ns)
+		switch {
+		case err == nil:
+			return ns, nil
+		case apierrors.IsNotFound(err):
+			return nil, err
+		default:
+			glog.Warningf("Failed to update NodeSet %q, retrying up to %d more times: %v", name, retries, err)
+		}
+	}
+	return nil, fmt.Errorf("giving up updating NodeSet %q after %d retries", name, initialRetries)
+}
+
+func parseGceUrl(url, expectedResource string) (project string, zone string, name string, err error) {
+	errMsg := fmt.Errorf("Wrong url: expected format https://content.googleapis.com/compute/v1/projects/<project-id>/zones/<zone>/%s/<name>, got %s", expectedResource, url)
+	if !strings.Contains(url, gceDomainSufix) {
+		return "", "", "", errMsg
+	}
+	if !strings.HasPrefix(url, gceUrlSchema) {
+		return "", "", "", errMsg
+	}
+	splitted := strings.Split(strings.Split(url, gceDomainSufix)[1], "/")
+	if len(splitted) != 5 || splitted[1] != "zones" {
+		return "", "", "", errMsg
+	}
+	if splitted[3] != expectedResource {
+		return "", "", "", fmt.Errorf("Wrong resource in url: expected %s, got %s", expectedResource, splitted[3])
+	}
+	project = splitted[0]
+	zone = splitted[2]
+	name = splitted[4]
+	return project, zone, name, nil
 }
 
 const (
