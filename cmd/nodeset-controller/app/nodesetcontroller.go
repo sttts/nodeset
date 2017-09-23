@@ -75,7 +75,7 @@ func Run(s *options.Options, stopCh <-chan struct{}) error {
 	*/
 	nodesetInformers := nodesetinformers.NewSharedInformerFactory(nodesetClient, ResyncPeriod(s)())
 	coreInformers := coreinformers.NewSharedInformerFactory(kubeClient, ResyncPeriod(s)())
-	nodesetController := nodenodeset.New(s.ControllerName, nodesetInformers.Nodeset().V1alpha1().NodeSets(), coreInformers.Core().V1().Nodes())
+	nodesetController := nodenodeset.New(s.ControllerName, nodesetInformers.Nodeset().V1alpha1().NodeSets(), nodesetInformers.Nodeset().V1alpha1().NodeClasses(), coreInformers.Core().V1().Nodes())
 
 	nodesetInformers.Start(stopCh)
 	coreInformers.Start(stopCh)
