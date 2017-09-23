@@ -39,14 +39,15 @@ type Options struct {
 	// kubeAPIBurst is the QPS burst to use while talking with kubernetes apiserver.
 	KubeAPIBurst int32
 	// ControllerName is name of the NodeSet controller, used to select which NodeSets
-	// will be processed by this controller, based on pod's "spec.NodeSetController".
-	NodeSetController string
+	// will be processed by this controller, based on pod's "spec.ControllerName".
+	ControllerName string
 }
 
 // New creates a new NodeSetControllerServer with a default config.
 func New() *Options {
 	s := Options{
 		MinResyncPeriod: metav1.Duration{Duration: 5 * time.Minute},
+		ControllerName:  "default",
 	}
 	return &s
 }
@@ -57,7 +58,7 @@ func (s *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&s.MinResyncPeriod.Duration, "min-resync-period", s.MinResyncPeriod.Duration, "The resync period in reflectors will be random between MinResyncPeriod and 2*MinResyncPeriod")
 	fs.Float32Var(&s.KubeAPIQPS, "kube-api-qps", s.KubeAPIQPS, "QPS to use while talking with kubernetes apiserver")
 	fs.Int32Var(&s.KubeAPIBurst, "kube-api-burst", s.KubeAPIBurst, "Burst to use while talking with kubernetes apiserver")
-	fs.StringVar(&s.NodeSetController, "controller-name", s.NodeSetController, "Name of the NodeSet controller, used to select which pods will be processed by this controller, based on pod's \"spec.NodeSetController\".")
+	fs.StringVar(&s.ControllerName, "controller-name", s.ControllerName, "Name of the NodeSet controller, used to select which pods will be processed by this controller, based on pod's \"spec.ControllerName\".")
 }
 
 // Validate is used to validate the options and config before launching.
