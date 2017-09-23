@@ -31,6 +31,7 @@ import (
 	"github.com/kube-node/nodeset/cmd/nodeset-controller/app/options"
 	nodesetclientset "github.com/kube-node/nodeset/pkg/client/clientset/versioned"
 	nodesetinformers "github.com/kube-node/nodeset/pkg/client/informers/externalversions"
+	gkenodeset "github.com/kube-node/nodeset/pkg/controller/nodeset/gke"
 	nodenodeset "github.com/kube-node/nodeset/pkg/controller/nodeset/node"
 )
 
@@ -73,16 +74,27 @@ func Run(s *options.Options, stopCh <-chan struct{}) error {
 		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubeClient.CoreV1().RESTClient()).Events("")})
 		recorder := eventBroadcaster.NewRecorder(scheme.Scheme, clientv1.EventSource{Component: "controller-manager"})
 	*/
+
 	nodesetInformers := nodesetinformers.NewSharedInformerFactory(nodesetClient, ResyncPeriod(s)())
-	coreInformers := coreinformers.NewSharedInformerFactory(kubeClient, ResyncPeriod(s)())
-	nodesetController := nodenodeset.New(s.ControllerName, nodesetInformers.Nodeset().V1alpha1().NodeSets(), nodesetInformers.Nodeset().V1alpha1().NodeClasses(), coreInformers.Core().V1().Nodes())
-
 	nodesetInformers.Start(stopCh)
-	coreInformers.Start(stopCh)
 
-	glog.V(1).Infof("Starting NodeSet controller")
+	glog.V(1).Infof("Starting NodeSet controller with %s backend", s.BackendName)
 
-	nodesetController.Run(2, stopCh)
+	switch s.BackendName {
+	case "node":
+		coreInformers := coreinformers.NewSharedInformerFactory(kubeClient, ResyncPeriod(s)())
+		coreInformers.Start(stopCh)
+
+		nodesetController := nodenodeset.New(s.ControllerName, nodesetInformers.Nodeset().V1alpha1().NodeSets(), nodesetInformers.Nodeset().V1alpha1().NodeClasses(), coreInformers.Core().V1().Nodes())
+		nodesetController.Run(2, stopCh)
+	case "gke":
+		nodesetController, err := gkenodeset.New(s.ControllerName, s.GKEClusterName, nodesetClient, nodesetInformers.Nodeset().V1alpha1().NodeSets())
+		if err != nil {
+			return err
+		}
+		nodesetController.Run(2, stopCh)
+	}
+
 	return nil
 }
 

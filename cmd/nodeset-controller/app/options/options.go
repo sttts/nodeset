@@ -19,6 +19,7 @@ limitations under the License.
 package options
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // Options is the main context object for the controller manager.
@@ -46,6 +48,9 @@ type Options struct {
 
 	// BackendName is the name of the backend to use.
 	BackendName string
+
+	// GKEClusterName is the cluster name for GKE.
+	GKEClusterName string
 }
 
 var validBackends = []string{"node", "gke"}
@@ -67,11 +72,23 @@ func (s *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Int32Var(&s.KubeAPIBurst, "kube-api-burst", s.KubeAPIBurst, "Burst to use while talking with kubernetes apiserver")
 	fs.StringVar(&s.ControllerName, "controller-name", s.ControllerName, "Name of the NodeSet controller, used to select which pods will be processed by this controller, based on pod's \"spec.ControllerName\".")
 	fs.StringVar(&s.BackendName, "backend", s.ControllerName, fmt.Sprintf("The backend to use (supported: %s).", strings.Join(validBackends, ", ")))
+	fs.StringVar(&s.GKEClusterName, "gke-cluster", s.GKEClusterName, "The cluster name in GKE if that backend is enabled.")
 }
 
 // Validate is used to validate the options and config before launching.
 func (s *Options) Validate() error {
 	var errs []error
+
+	backends := sets.NewString(validBackends...)
+	if !backends.Has(s.BackendName) {
+		errs = append(errs, fmt.Errorf("invalid backend name %q, allowed: %s", s.BackendName, strings.Join(validBackends, ", ")))
+	}
+
+	if s.BackendName == "gke" {
+		if s.GKEClusterName == "" {
+			errs = append(errs, errors.New("GKE cluster name is unset"))
+		}
+	}
 
 	return utilerrors.NewAggregate(errs)
 }

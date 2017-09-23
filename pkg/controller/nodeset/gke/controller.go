@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package node
+package gke
 
 import (
 	"fmt"
@@ -22,30 +22,44 @@ import (
 
 	"github.com/golang/glog"
 
+	gce "google.golang.org/api/compute/v1"
+	gke "google.golang.org/api/container/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
+	nodesetclientset "github.com/kube-node/nodeset/pkg/client/clientset/versioned"
 	nodesetinformers "github.com/kube-node/nodeset/pkg/client/informers/externalversions/nodeset/v1alpha1"
 	nodesetlisters "github.com/kube-node/nodeset/pkg/client/listers/nodeset/v1alpha1"
+	"github.com/kube-node/nodeset/pkg/nodeset/v1alpha1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
+
+const (
+	nodeAutoprovisioningPrefix = "nodeautoprovisioning"
 )
 
 type Controller struct {
-	nodesetLister   nodesetlisters.NodeSetLister
-	nodesetIndexer  cache.Indexer
-	nodesetsSynched cache.InformerSynced
+	nodesetClientset nodesetclientset.Interface
+	nodesetLister    nodesetlisters.NodeSetLister
+	nodesetIndexer   cache.Indexer
+	nodesetsSynched  cache.InformerSynced
 
-	name string
+	name    string
+	gke     *gke.Service
+	gce     *gce.Service
+	cluster Cluster
 
 	// queue is where incoming work is placed to de-dup and to allow "easy"
 	// rate limited requeues on errors
 	queue workqueue.RateLimitingInterface
 }
 
-func New(name string, nodesets nodesetinformers.NodeSetInformer) *Controller {
+func New(name string, clusterName string, client nodesetclientset.Interface, nodesets nodesetinformers.NodeSetInformer) (*Controller, error) {
 	// index nodesets by uids
 	// TODO: move outside of New
 	nodesets.Informer().AddIndexers(map[string]cache.IndexFunc{
@@ -86,7 +100,14 @@ func New(name string, nodesets nodesetinformers.NodeSetInformer) *Controller {
 		},
 	})
 
-	return c
+	// get GKE client
+	var err error
+	c.gke, c.gce, c.cluster, err = NewGKEService(clusterName)
+	if err != nil {
+		return nil, err
+	}
+
+	return c, nil
 }
 
 func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
@@ -109,6 +130,8 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
 		// then rekick the worker after one second
 		go wait.Until(c.runWorker, time.Second, stopCh)
 	}
+
+	go wait.Until(c.runReconciler, time.Minute, stopCh)
 
 	// wait until we're told to stop
 	<-stopCh
@@ -148,7 +171,7 @@ func (c *Controller) processNextWorkItem() bool {
 
 	// there was a failure so be sure to report it.  This method allows for
 	// pluggable error handling which can be used for things like
-	// cluster-monitoring
+	// Cluster-monitoring
 	utilruntime.HandleError(fmt.Errorf("%v failed with : %v", key, err))
 
 	// since we failed, we should requeue the item to work on later.  This
@@ -178,6 +201,74 @@ func (c *Controller) syncHandler(key string) error {
 	glog.Infof("NodeSet seen %q", nodeset.Name)
 
 	return nil
+}
+
+func (c *Controller) runReconciler() {
+	for c.reconsileNodeSets() {
+	}
+}
+
+func (c *Controller) reconsileNodeSets() bool {
+	resp, err := c.gke.Projects.Zones.Clusters.NodePools.List(c.cluster.Project, c.cluster.Zone, c.cluster.Name).Do()
+	if err != nil {
+		glog.Warningf("NodePool reconcile error: %v", err)
+		return true
+	}
+
+	for _, pool := range resp.NodePools {
+		/*autoprovisioned := strings.Contains(pool.Name, nodeAutoprovisioningPrefix)
+		autoscaled := pool.Autoscaling != nil && nodePool.Autoscaling.Enabled
+		if !autoprovisioned && !autoscaled {
+			continue
+		}
+		// format is
+		// "https://www.googleapis.com/compute/v1/projects/mwielgus-proj/zones/europe-west1-b/instanceGroupManagers/gke-cluster-1-default-pool-ba78a787-grp"
+		for _, igurl := range nodePool.InstanceGroupUrls {
+			project, zone, name, err := parseGceUrl(igurl, "instanceGroupManagers")
+			if err != nil {
+				return err
+			}
+			mig := &Mig{
+				GceRef: GceRef{
+					Name:    name,
+					Zone:    zone,
+					Project: project,
+				},
+				gceManager:      m,
+				exist:           true,
+				autoprovisioned: autoprovisioned,
+				nodePoolName:    nodePool.Name,
+			}
+			existingMigs[mig.GceRef] = struct{}{}
+
+			if autoscaled {
+				mig.minSize = int(nodePool.Autoscaling.MinNodeCount)
+				mig.maxSize = int(nodePool.Autoscaling.MaxNodeCount)
+			} else if autoprovisioned {
+				mig.minSize = minAutoprovisionedSize
+				mig.maxSize = maxAutoprovisionedSize
+			}
+			m.RegisterMig(mig)
+		}
+		*/
+
+		_, err := c.nodesetLister.Get(pool.Name)
+		if apierrors.IsNotFound(err) {
+			_, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Create(&v1alpha1.NodeSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: pool.Name,
+				},
+				Spec: v1alpha1.NodeSetSpec{
+					NodeSetController: c.name,
+					MaxSurge:          &intstr.FromInt(1),
+					//Replicas: pool.
+				},
+			})
+			continue
+		}
+	}
+
+	return true
 }
 
 const (
