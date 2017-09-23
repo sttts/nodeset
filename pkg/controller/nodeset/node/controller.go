@@ -46,12 +46,14 @@ type Controller struct {
 	nodeIndexer cache.Indexer
 	nodeSynched cache.InformerSynced
 
+	name string
+
 	// queue is where incoming work is placed to de-dup and to allow "easy"
 	// rate limited requeues on errors
 	queue workqueue.RateLimitingInterface
 }
 
-func New(nodesets nodesetinformers.NodeSetInformer, nodes coreinformers.NodeInformer) *Controller {
+func New(name string, nodesets nodesetinformers.NodeSetInformer, nodes coreinformers.NodeInformer) *Controller {
 	// index nodesets by uids
 	// TODO: move outside of New
 	nodesets.Informer().AddIndexers(map[string]cache.IndexFunc{
@@ -223,11 +225,15 @@ func (c *Controller) processNextWorkItem() bool {
 func (c *Controller) syncHandler(key string) error {
 	nodeset, err := c.nodesetLister.Get(key)
 	if apierrors.IsNotFound(err) {
-		glog.V(0).Infof("Pod %s was not found: %v", key, err)
+		glog.V(0).Infof("NodeSet %s was not found: %v", key, err)
 		return nil
 	}
 	if err != nil {
 		return err
+	}
+
+	if nodeset.Spec.NodeSetController != c.name {
+		return nil
 	}
 
 	glog.Infof("NodeSet seen %q", nodeset.Name)
