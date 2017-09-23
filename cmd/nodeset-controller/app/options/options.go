@@ -19,6 +19,8 @@ limitations under the License.
 package options
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -41,7 +43,12 @@ type Options struct {
 	// ControllerName is name of the NodeSet controller, used to select which NodeSets
 	// will be processed by this controller, based on pod's "spec.ControllerName".
 	ControllerName string
+
+	// BackendName is the name of the backend to use.
+	BackendName string
 }
+
+var validBackends = []string{"node", "gke"}
 
 // New creates a new NodeSetControllerServer with a default config.
 func New() *Options {
@@ -59,6 +66,7 @@ func (s *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Float32Var(&s.KubeAPIQPS, "kube-api-qps", s.KubeAPIQPS, "QPS to use while talking with kubernetes apiserver")
 	fs.Int32Var(&s.KubeAPIBurst, "kube-api-burst", s.KubeAPIBurst, "Burst to use while talking with kubernetes apiserver")
 	fs.StringVar(&s.ControllerName, "controller-name", s.ControllerName, "Name of the NodeSet controller, used to select which pods will be processed by this controller, based on pod's \"spec.ControllerName\".")
+	fs.StringVar(&s.BackendName, "backend", s.ControllerName, fmt.Sprintf("The backend to use (supported: %s).", strings.Join(validBackends, ", ")))
 }
 
 // Validate is used to validate the options and config before launching.

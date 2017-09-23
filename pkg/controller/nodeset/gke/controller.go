@@ -22,14 +22,10 @@ import (
 
 	"github.com/golang/glog"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	coreinformers "k8s.io/client-go/informers/core/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
@@ -38,17 +34,9 @@ import (
 )
 
 type Controller struct {
-	nodesetLister  nodesetlisters.NodeSetLister
-	nodesetIndexer cache.Indexer
-	nodesetSynced  cache.InformerSynced
-
-	nodeClassLister  nodesetlisters.NodeClassLister
-	nodeClassIndexer cache.Indexer
-	nodeClassSynced  cache.InformerSynced
-
-	nodeLister  corelisters.NodeLister
-	nodeIndexer cache.Indexer
-	nodeSynced  cache.InformerSynced
+	nodesetLister   nodesetlisters.NodeSetLister
+	nodesetIndexer  cache.Indexer
+	nodesetsSynched cache.InformerSynced
 
 	name string
 
@@ -57,30 +45,17 @@ type Controller struct {
 	queue workqueue.RateLimitingInterface
 }
 
-func New(name string, nodesets nodesetinformers.NodeSetInformer, nodeclasses nodesetinformers.NodeClassInformer, nodes coreinformers.NodeInformer) *Controller {
+func New(name string, nodesets nodesetinformers.NodeSetInformer) *Controller {
 	// index nodesets by uids
 	// TODO: move outside of New
 	nodesets.Informer().AddIndexers(map[string]cache.IndexFunc{
 		UIDIndex: MetaUIDIndexFunc,
 	})
 
-	// index nodes by owner uid
-	nodes.Informer().AddIndexers(map[string]cache.IndexFunc{
-		OwnerUIDIndex: MetaOwnerUIDIndexFunc,
-	})
-
 	c := &Controller{
-		nodesetLister:  nodesets.Lister(),
-		nodesetIndexer: nodesets.Informer().GetIndexer(),
-		nodesetSynced:  nodesets.Informer().HasSynced,
-
-		nodeClassLister:  nodeclasses.Lister(),
-		nodeClassIndexer: nodeclasses.Informer().GetIndexer(),
-		nodeClassSynced:  nodeclasses.Informer().HasSynced,
-
-		nodeLister:  nodes.Lister(),
-		nodeIndexer: nodes.Informer().GetIndexer(),
-		nodeSynced:  nodes.Informer().HasSynced,
+		nodesetLister:   nodesets.Lister(),
+		nodesetIndexer:  nodesets.Informer().GetIndexer(),
+		nodesetsSynched: nodesets.Informer().HasSynced,
 
 		name: name,
 
@@ -111,52 +86,6 @@ func New(name string, nodesets nodesetinformers.NodeSetInformer, nodeclasses nod
 		},
 	})
 
-	queueOwner := func(node *corev1.Node) {
-		owner := metav1.GetControllerOf(node)
-		if owner == nil {
-			return
-		}
-
-		objs, err := c.nodesetIndexer.ByIndex(UIDIndex, string(owner.UID))
-		if err != nil {
-			return
-		}
-
-		for set := range objs {
-			key, err := cache.MetaNamespaceKeyFunc(set)
-			if err == nil {
-				c.queue.Add(key)
-			}
-		}
-	}
-	nodes.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			node, ok := obj.(*corev1.Node)
-			if !ok {
-				return
-			}
-			queueOwner(node)
-		},
-		UpdateFunc: func(old interface{}, new interface{}) {
-			node, ok := new.(*corev1.Node)
-			if !ok {
-				return
-			}
-			queueOwner(node)
-		},
-		DeleteFunc: func(obj interface{}) {
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				c.queue.Add(key)
-			}
-			node, err := c.nodeLister.Get(key)
-			if err != nil {
-				return
-			}
-			queueOwner(node)
-		},
-	})
-
 	return c
 }
 
@@ -169,7 +98,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
 	glog.Infof("Starting <NAME> controller")
 
 	// wait for your secondary caches to fill before starting your work
-	if !cache.WaitForCacheSync(stopCh, c.nodesetSynced, c.nodeSynced, c.nodeClassSynced) {
+	if !cache.WaitForCacheSync(stopCh, c.nodesetsSynched) {
 		return
 	}
 
@@ -235,7 +164,7 @@ func (c *Controller) processNextWorkItem() bool {
 func (c *Controller) syncHandler(key string) error {
 	nodeset, err := c.nodesetLister.Get(key)
 	if apierrors.IsNotFound(err) {
-		glog.V(0).Infof("NodeSet %s was not found: %v", key, err)
+		glog.V(0).Infof("Pod %s was not found: %v", key, err)
 		return nil
 	}
 	if err != nil {
@@ -248,18 +177,11 @@ func (c *Controller) syncHandler(key string) error {
 
 	glog.Infof("NodeSet seen %q", nodeset.Name)
 
-	objs, err := c.nodeIndexer.ByIndex(OwnerUIDIndex, string(nodeset.GetUID()))
-	if err != nil {
-		return fmt.Errorf("failed to get nodes for NodeSet %q: %v", nodeset.Name, err)
-	}
-	glog.Infof("Found %d nodes for NodeSet %q.", len(objs), nodeset.Name)
-
 	return nil
 }
 
 const (
-	UIDIndex      string = "uid"
-	OwnerUIDIndex string = "owner-uid"
+	UIDIndex string = "uid"
 )
 
 // MetaUIDIndexFunc indexes by uid.
@@ -269,17 +191,4 @@ func MetaUIDIndexFunc(obj interface{}) ([]string, error) {
 		return []string{""}, fmt.Errorf("object has no meta: %v", err)
 	}
 	return []string{string(meta.GetUID())}, nil
-}
-
-// MetOwneraUIDIndexFunc indexes by uid.
-func MetaOwnerUIDIndexFunc(obj interface{}) ([]string, error) {
-	node, ok := obj.(*corev1.Node)
-	if !ok {
-		return nil, nil
-	}
-	owner := metav1.GetControllerOf(node)
-	if owner == nil {
-		return nil, nil
-	}
-	return []string{string(owner.UID)}, nil
 }
