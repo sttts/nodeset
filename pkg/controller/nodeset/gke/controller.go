@@ -194,7 +194,7 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 func (c *Controller) syncHandler(key string) error {
-	nodeset, err := c.nodesetLister.Get(key)
+	ns, err := c.nodesetLister.Get(key)
 	if apierrors.IsNotFound(err) {
 		glog.V(0).Infof("Pod %s was not found: %v", key, err)
 		return nil
@@ -203,11 +203,50 @@ func (c *Controller) syncHandler(key string) error {
 		return err
 	}
 
-	if nodeset.Spec.NodeSetController != c.name {
+	if ns.Spec.NodeSetController != c.name {
 		return nil
 	}
 
-	glog.Infof("NodeSet %q seen in queue", nodeset.Name)
+	glog.Infof("NodeSet %q seen in queue", ns.Name)
+
+	// update instance group
+	if ns.Spec.Replicas != ns.Status.Replicas {
+		project := ns.Annotations[projectAnnotationKey]
+		zone := ns.Annotations[zoneAnnotationKey]
+		if project == "" || zone == "" {
+			// skipping invalid NodeSet. Will be removed on next reconsilation.
+			glog.Warningf("NodeSet %q cannot have empty project or zone.", ns.Name)
+			return nil
+		}
+		comps := strings.SplitN(ns.Name, "-", 2)
+		if comps[0] != zone {
+			glog.Warningf("NodeSet %q has a zone mismatch, annotations say %q, but name say %q", ns.Name, project, comps[0])
+			return nil
+		}
+		if len(comps) != 2 {
+			glog.Warningf("Skipping invalid NodeSet %q.", ns.Name)
+			return nil
+		}
+		name := comps[1]
+		_, err := c.gce.InstanceGroupManagers.Resize(project, zone, name, int64(ns.Spec.Replicas)).Do()
+		if err != nil {
+			return err
+		}
+	}
+
+	// update NodeSet
+	newNS, err := c.updateNodeSetWithRetries(10, ns, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
+		old.Status.Replicas = int32(ns.Spec.Replicas)
+		old.Status.ObservedGeneration = ns.Generation
+		return old, nil
+	})
+	if err != nil {
+		return err
+	}
+	if ns.Spec.Replicas != newNS.Spec.Replicas {
+		glog.Infof("NodeSet %q changed spec.replicas during controller run. Requeueing.", ns.Name)
+		c.queue.Add(key)
+	}
 
 	return nil
 }
@@ -260,7 +299,7 @@ func (c *Controller) reconsileNodeSets() bool {
 			}
 
 			nsName := zone + "-" + name
-			_, err = c.nodesetLister.Get(nsName)
+			ns, err := c.nodesetLister.Get(nsName)
 			if apierrors.IsNotFound(err) {
 				_, err = c.nodesetClientset.NodesetV1alpha1().NodeSets().Create(&v1alpha1.NodeSet{
 					ObjectMeta: metav1.ObjectMeta{
@@ -278,8 +317,7 @@ func (c *Controller) reconsileNodeSets() bool {
 						Replicas:          int32(igm.TargetSize),
 					},
 					Status: v1alpha1.NodeSetStatus{
-						Replicas:        int32(igm.TargetSize),
-						RunningReplicas: int32(igm.TargetSize),
+						Replicas: int32(igm.TargetSize),
 						// TODO: set more of the fields
 					},
 				})
@@ -292,11 +330,17 @@ func (c *Controller) reconsileNodeSets() bool {
 			// we have seen this one
 			unseenNodeSets.Delete(nsName)
 
-			// update
-			_, err = c.updateNodeSetWithRetries(10, nsName, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
-				old.Spec.Replicas = int32(igm.TargetSize)
-				old.Status.Replicas = int32(igm.TargetSize)
-				old.Status.RunningReplicas = int32(igm.TargetSize)
+			// check whether spec wasn't changed, if it was skip the reconsilation
+			if ns.Spec.Replicas != ns.Spec.Replicas {
+				continue
+			}
+
+			// update NodeSet
+			_, err = c.updateNodeSetWithRetries(10, ns, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
+				if old.Spec.Replicas == old.Status.Replicas {
+					old.Spec.Replicas = int32(igm.TargetSize)
+					old.Status.Replicas = int32(igm.TargetSize)
+				}
 				return old, nil
 			})
 			if err != nil {
@@ -312,9 +356,18 @@ func (c *Controller) reconsileNodeSets() bool {
 
 	// delete unseen nodesets
 	for _, nsName := range unseenNodeSets.List() {
+		ns, err := c.nodesetLister.Get(nsName)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			glog.Warningf("Failed to get NodeSet %q: %v", nsName, err)
+			continue
+		}
+
 		// remove our finalizer. This also makes sure we will recreate the NodeSet if Google had a hickup
 		// and didn't show us the InstanceGroupManager anymore. I.e. we will not try to delete the later.
-		_, err := c.updateNodeSetWithRetries(10, nsName, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
+		_, err = c.updateNodeSetWithRetries(10, ns, func(old *v1alpha1.NodeSet) (*v1alpha1.NodeSet, error) {
 			if len(old.Finalizers) == 0 {
 				return old, nil
 			}
@@ -341,16 +394,20 @@ func (c *Controller) reconsileNodeSets() bool {
 	return true
 }
 
-func (c *Controller) updateNodeSetWithRetries(retries int, name string, f func(*v1alpha1.NodeSet) (*v1alpha1.NodeSet, error)) (*v1alpha1.NodeSet, error) {
+func (c *Controller) updateNodeSetWithRetries(retries int, ns *v1alpha1.NodeSet, f func(*v1alpha1.NodeSet) (*v1alpha1.NodeSet, error)) (*v1alpha1.NodeSet, error) {
+	nsName := ns.Name
 	const initialRetries = 10
 	for retries := initialRetries; retries > 0; retries = retries - 1 {
-		ns, err := c.nodesetLister.Get(name)
-		if apierrors.IsNotFound(err) {
-			return nil, err
-		}
-		if err != nil {
-			glog.Warningf("Failed to get NodeSet %q, retrying up to %d more times: %v: %v", name, retries, err)
-			continue
+		var err error
+		if retries < initialRetries {
+			ns, err = c.nodesetLister.Get(ns.Name)
+			if apierrors.IsNotFound(err) {
+				return nil, err
+			}
+			if err != nil {
+				glog.Warningf("Failed to get NodeSet %q, retrying up to %d more times: %v: %v", nsName, retries, err)
+				continue
+			}
 		}
 
 		ns, err = f(ns.DeepCopy())
@@ -365,10 +422,10 @@ func (c *Controller) updateNodeSetWithRetries(retries int, name string, f func(*
 		case apierrors.IsNotFound(err):
 			return nil, err
 		default:
-			glog.Warningf("Failed to update NodeSet %q, retrying up to %d more times: %v", name, retries, err)
+			glog.Warningf("Failed to update NodeSet %q, retrying up to %d more times: %v", nsName, retries, err)
 		}
 	}
-	return nil, fmt.Errorf("giving up updating NodeSet %q after %d retries", name, initialRetries)
+	return nil, fmt.Errorf("giving up updating NodeSet %q after %d retries", nsName, initialRetries)
 }
 
 func parseGceUrl(url, expectedResource string) (project string, zone string, name string, err error) {
