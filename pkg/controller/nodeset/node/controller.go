@@ -38,13 +38,17 @@ import (
 )
 
 type Controller struct {
-	nodesetLister   nodesetlisters.NodeSetLister
-	nodesetIndexer  cache.Indexer
-	nodesetsSynched cache.InformerSynced
+	nodesetLister  nodesetlisters.NodeSetLister
+	nodesetIndexer cache.Indexer
+	nodesetSynced  cache.InformerSynced
+
+	nodeClassLister  nodesetlisters.NodeClassLister
+	nodeClassIndexer cache.Indexer
+	nodeClassSynced  cache.InformerSynced
 
 	nodeLister  corelisters.NodeLister
 	nodeIndexer cache.Indexer
-	nodeSynched cache.InformerSynced
+	nodeSynced  cache.InformerSynced
 
 	name string
 
@@ -53,7 +57,7 @@ type Controller struct {
 	queue workqueue.RateLimitingInterface
 }
 
-func New(name string, nodesets nodesetinformers.NodeSetInformer, nodes coreinformers.NodeInformer) *Controller {
+func New(name string, nodesets nodesetinformers.NodeSetInformer, nodeclasses nodesetinformers.NodeClassInformer, nodes coreinformers.NodeInformer) *Controller {
 	// index nodesets by uids
 	// TODO: move outside of New
 	nodesets.Informer().AddIndexers(map[string]cache.IndexFunc{
@@ -66,13 +70,17 @@ func New(name string, nodesets nodesetinformers.NodeSetInformer, nodes coreinfor
 	})
 
 	c := &Controller{
-		nodesetLister:   nodesets.Lister(),
-		nodesetIndexer:  nodesets.Informer().GetIndexer(),
-		nodesetsSynched: nodesets.Informer().HasSynced,
+		nodesetLister:  nodesets.Lister(),
+		nodesetIndexer: nodesets.Informer().GetIndexer(),
+		nodesetSynced:  nodesets.Informer().HasSynced,
+
+		nodeClassLister:  nodeclasses.Lister(),
+		nodeClassIndexer: nodeclasses.Informer().GetIndexer(),
+		nodeClassSynced:  nodeclasses.Informer().HasSynced,
 
 		nodeLister:  nodes.Lister(),
 		nodeIndexer: nodes.Informer().GetIndexer(),
-		nodeSynched: nodes.Informer().HasSynced,
+		nodeSynced:  nodes.Informer().HasSynced,
 
 		queue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "nodeset"),
 	}
@@ -159,7 +167,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) {
 	glog.Infof("Starting <NAME> controller")
 
 	// wait for your secondary caches to fill before starting your work
-	if !cache.WaitForCacheSync(stopCh, c.nodesetsSynched, c.nodeSynched) {
+	if !cache.WaitForCacheSync(stopCh, c.nodesetSynced, c.nodeSynced, c.nodeClassSynced) {
 		return
 	}
 
