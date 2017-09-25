@@ -3,4 +3,4 @@ LABEL maintainer "henrik@loodse.com"
 
 RUN apt-get update && apt-get install -y ca-certificates curl openssh-server
 
-ADD _output/node-controller /nodeset-controller
+ADD _output/nodeset-controller /nodeset-controller
