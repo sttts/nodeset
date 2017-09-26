@@ -45,11 +45,11 @@ const (
 	nodeAutoprovisioningPrefix    = "nodeautoprovisioning"
 	gceUrlSchema                  = "https"
 	gceDomainSufix                = "googleapis.com/compute/v1/projects/"
-	gkeControllerAnnotationPrefix = "gke.nodeset.kube-node.github.com/"
+	gkeControllerAnnotationPrefix = "gke.nodeset-controller.nodeset.k8s.io/"
 	nodePoolAnnotationKey         = gkeControllerAnnotationPrefix + "node-pool"
 	zoneAnnotationKey             = gkeControllerAnnotationPrefix + "zone"
 	projectAnnotationKey          = gkeControllerAnnotationPrefix + "project"
-	nodeSetFinalizer              = "gke.nodeset.kube-node.github.com"
+	nodeSetFinalizer              = "gke.nodeset-controller.nodeset.k8s.io"
 )
 
 type Controller struct {

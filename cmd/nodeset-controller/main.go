@@ -22,13 +22,13 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/util/flag"
 	"k8s.io/apiserver/pkg/util/logs"
 
 	"github.com/kube-node/nodeset/cmd/nodeset-controller/app"
 	"github.com/kube-node/nodeset/cmd/nodeset-controller/app/options"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 func init() {
